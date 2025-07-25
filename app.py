@@ -5,6 +5,7 @@ import pandas as pd
 import re
 import json
 import os
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -21,9 +22,15 @@ KEYWORDS = [
     "pemuatan", "tabloid", "sponsorship", "sponsor", "media daring"
 ]
 KEYWORD_PATTERN = r'\b(' + '|'.join(re.escape(k) for k in KEYWORDS) + r')\b'
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
+
+# Daftar User-Agent yang lebih beragam
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+]
 
 # =========================== FUNGSI UTILITY ==================================
 @st.cache_resource
@@ -49,7 +56,8 @@ s = requests_retry_session()
 def get_detail_paket(id_paket):
     url_detail = f"https://sirup.lkpp.go.id/sirup/home/detailPaketPenyediaPublic2017/{id_paket}"
     try:
-        resp = s.get(url_detail, headers=HEADERS)
+        headers = {'User-Agent': random.choice(USER_AGENTS)}
+        resp = s.get(url_detail, headers=headers, timeout=10)
         resp.raise_for_status()
         html = resp.text
         start = html.find("Uraian Pekerjaan")
@@ -75,7 +83,9 @@ def process_satker(satker, idx, total, tahun, progress_placeholder, status_place
             'iDisplayStart': '0',
             'iDisplayLength': '100000'
         }
-        res = s.get(url_paket, params=params, headers=HEADERS)
+        
+        headers = {'User-Agent': random.choice(USER_AGENTS)}
+        res = s.get(url_paket, params=params, headers=headers)
         res.raise_for_status()
         paket_list = res.json().get("aaData", [])
 
@@ -101,7 +111,10 @@ def process_satker(satker, idx, total, tahun, progress_placeholder, status_place
                         'metodePemilihan': p[3],
                         'pagu': p[2]
                     })
-        
+                
+                # Jeda waktu antar permintaan detail paket
+                time.sleep(0.5)
+
         progress = (idx) / total
         progress_placeholder.progress(progress)
         status_placeholder.write(f"[{idx}/{total}] ✔️ {nama_satker} ({len(filtered_data)} cocok)")
@@ -121,13 +134,12 @@ def main():
     st.sidebar.header("Konfigurasi Scraping")
     id_kldi = st.sidebar.text_input("ID KLDI", "D1005")
     tahun = st.sidebar.text_input("Tahun Anggaran", "2025")
-    max_satker_workers = st.sidebar.slider("Jumlah Worker Satker", 1, 20, 10)
-    max_detail_workers = st.sidebar.slider("Jumlah Worker Detail Paket", 1, 50, 20)
+    max_satker_workers = st.sidebar.slider("Jumlah Worker Satker", 1, 10, 5)
+    max_detail_workers = st.sidebar.slider("Jumlah Worker Detail Paket", 1, 10, 5)
 
-    # Simpan worker count ke session state agar bisa diakses oleh fungsi lain
-    if 'max_satker_workers' not in st.session_state:
-        st.session_state.max_satker_workers = max_satker_workers
-        st.session_state.max_detail_workers = max_detail_workers
+    # Simpan worker count ke session state
+    st.session_state.max_satker_workers = max_satker_workers
+    st.session_state.max_detail_workers = max_detail_workers
 
     st.write("---")
 
@@ -138,16 +150,15 @@ def main():
         start_time = time.time()
         st.info("📦 Mulai scraping data...")
 
-        # Persiapan UI untuk output
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         data_placeholder = st.empty()
         
-        # --- Ambil daftar Satuan Kerja ---
         try:
             url_satker = "https://sirup.lkpp.go.id/sirup/datatablectr/datatableruprekapkldi"
             params = {'idKldi': id_kldi, 'tahun': tahun, 'sEcho': '1', 'iColumns': '10', 'iDisplayStart': '0', 'iDisplayLength': '100000'}
-            res = s.get(url_satker, params=params, headers=HEADERS)
+            headers = {'User-Agent': random.choice(USER_AGENTS)}
+            res = s.get(url_satker, params=params, headers=headers)
             res.raise_for_status()
             satkers = res.json().get("aaData", [])
             st.success(f"📋 Total satuan kerja ditemukan: {len(satkers)}")
@@ -155,7 +166,6 @@ def main():
             st.error(f"❌ Gagal ambil data satuan kerja: {e}")
             st.stop()
 
-        # --- Proses data dengan multithreading ---
         all_data = []
         with ThreadPoolExecutor(max_workers=st.session_state.max_satker_workers) as executor:
             futures = {
@@ -174,7 +184,6 @@ def main():
         status_placeholder.success("✅ Scraping selesai!")
         st.write(f"🟢 Program selesai dalam **{time.time() - start_time:.2f}** detik.")
         
-        # --- Tampilkan dan simpan data ---
         if all_data:
             df = pd.DataFrame(all_data, columns=['satuanKerja', 'namaPaket', 'uraianPekerjaan', 'metodePemilihan', 'pagu'])
             df.drop_duplicates(subset=['satuanKerja', 'namaPaket', 'uraianPekerjaan'], inplace=True)
@@ -184,7 +193,6 @@ def main():
             
             data_placeholder.dataframe(df)
 
-            # Sediakan tombol download
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="Unduh data sebagai CSV",
@@ -193,7 +201,6 @@ def main():
                 mime='text/csv',
             )
 
-            # Buat file excel di folder sementara untuk diunduh
             excel_path = f'belanja_iklan_{id_kldi}_{tahun}.xlsx'
             try:
                 df.to_excel(excel_path, index=False)
